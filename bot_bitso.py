@@ -152,5 +152,5 @@ def ejecutar_bot(modo_test=False, ciclos_test=3):
 # ▶️ EJECUCIÓN DEL BOT
 # ==========================================================
 if __name__ == "__main__":
-    ejecutar_bot(modo_test=True)  # Cambia a False cuando lo dejes en modo continuo
+    ejecutar_bot(modo_test=False)  # Cambia a False cuando lo dejes en modo continuo
 
