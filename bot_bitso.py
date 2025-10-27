@@ -1,125 +1,141 @@
 # ==========================================================
-# BITSO BOT TESTNET - Versión Optimizada
+# 🤖 BITSO BOT TESTNET (versión optimizada)
 # Autor: Jorge Macías / valorlogistico-ctrl
 # ==========================================================
 
 import os
-import time
 import csv
-import ccxt
-import logging
+import time
 import requests
+import logging
 from datetime import datetime
+import ccxt
 from dotenv import load_dotenv
 
 # ==========================================================
-# CONFIGURACIÓN INICIAL
+# ⚙️ CONFIGURACIÓN INICIAL
 # ==========================================================
-load_dotenv()
 
-# Credenciales Bitso (Testnet)
-BITSO_API_KEY = os.getenv("JUMPLK1FNYn")
-BITSO_API_SECRET = os.getenv("93p93bb381864f679e4b64bfb87efnY")
-exchange = ccxt.bitso({
-    "apiKey": BITSO_API_KEY,
-    "secret": BITSO_API_SECRET,
-    "enableRateLimit": True
-})
+load_dotenv()  # Carga variables del archivo .env
+
+# Credenciales Bitso
+BITSO_API_KEY = os.getenv("BITSO_API_KEY")
+BITSO_API_SECRET = os.getenv("BITSO_API_SECRET")
 
 # Credenciales Telegram
-TELEGRAM_TOKEN = os.getenv("8394147456")
-TELEGRAM_CHAT_ID = os.getenv("AAHP98mB8ey7TKK14A3fMAJtUyiJoA")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ==========================================================
-# PARÁMETROS DEL BOT
-# ==========================================================
-PAIR = "BTC/MXN"              # Par de trading
-INTERVAL = 60                 # Tiempo entre ejecuciones (segundos)
-COMISION_MAKER = 0.001        # 0.1% Bitso Maker
-MONTOS_BASE = 0.00005         # BTC base (~100 MXN aprox)
-CSV_FILE = "bitso_trades.csv" # Archivo de registro
-
+# Variables globales
 balance_neto = 0.0
+CSV_FILE = "bitso_trades.csv"
+DAILY_FILE = "daily_summary.csv"
+ultimo_dia = None
 
 # ==========================================================
-# CONFIGURACIÓN DE LOGGING
-# ==========================================================
-logging.basicConfig(level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S")
-
-# ==========================================================
-# FUNCIÓN: Enviar mensaje a Telegram
+# 📡 FUNCIÓN: Enviar mensaje a Telegram
 # ==========================================================
 def enviar_telegram(mensaje):
     """Envía mensajes al chat de Telegram configurado."""
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}
-        requests.post(url, data=data)
+        if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}
+            requests.post(url, data=data)
     except Exception as e:
-        logging.error(f"❌ Error enviando mensaje a Telegram: {e}")
+        print(f"⚠️ Error enviando Telegram: {e}")
 
 # ==========================================================
-# FUNCIÓN: Registrar operación en CSV
+# 💾 FUNCIÓN: Registrar operación
 # ==========================================================
 def registrar_operacion(par, accion, precio, monto, comision_pct):
-    """Guarda operaciones en CSV y actualiza balance neto."""
+    """Guarda operaciones y actualiza el balance neto."""
     global balance_neto
 
     fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     comision = precio * monto * comision_pct
-    resultado_neto = (precio * monto) - comision if accion == "SELL" else -(precio * monto + comision)
+    resultado_neto = -(precio * monto + comision) if accion == "BUY" else (precio * monto - comision)
     balance_neto += resultado_neto
 
-    # Escribir en CSV
     file_exists = os.path.isfile(CSV_FILE)
     with open(CSV_FILE, mode="a", newline="") as archivo:
         writer = csv.writer(archivo)
         if not file_exists:
-            writer.writerow(["timestamp", "par", "accion", "precio", "monto", "comision", "resultado_neto", "balance_neto"])
-        writer.writerow([fecha, par, accion, precio, monto, comision, resultado_neto, balance_neto])
+            writer.writerow(["timestamp", "par", "acción", "precio", "monto", "comisión", "resultado_neto"])
+        writer.writerow([fecha, par, accion, precio, monto, comision, resultado_neto])
 
-    logging.info(f"💾 {accion} {monto} BTC @ {precio} | Balance: {balance_neto:.2f} MXN")
-    enviar_telegram(f"💹 {accion} {par}\nPrecio: {precio:,.2f}\nMonto: {monto} BTC\nBalance: {balance_neto:.2f} MXN")
+    logging.info(f"💾 Registro guardado: {accion} {monto} {par} @ {precio} | Comisión: {comision:.2f}")
+    enviar_telegram(f"{accion} {par}\nPrecio: {precio:,.2f}\nMonto: {monto:.6f}\nBalance: {balance_neto:,.2f} MXN")
 
 # ==========================================================
-# FUNCIÓN: Calcular monto óptimo
+# 🧮 FUNCIÓN: Calcular monto óptimo
 # ==========================================================
 def calcular_monto_optimo(precio_actual, balance_mxn=1000):
-    """Calcula monto dinámico según riesgo 3% del capital."""
-    riesgo_pct = 0.03  # 3%
-    monto_mxn = balance_mxn * riesgo_pct
-    monto_btc = monto_mxn / precio_actual
-    return round(monto_btc, 6)
+    """Calcula el monto máximo rentable considerando comisiones."""
+    MONTO_BASE = 0.0001  # BTC mínimo base (~210 MXN aprox)
+    max_monto = balance_mxn / precio_actual
+    monto_final = min(MONTO_BASE * 5, max_monto)
+    return round(monto_final, 6)
 
 # ==========================================================
-# LOOP PRINCIPAL DEL BOT
+# 🧾 FUNCIÓN: Registro de balance diario
+# ==========================================================
+def registrar_resumen_diario():
+    """Guarda el balance neto al cierre de cada día y envía resumen por Telegram."""
+    global ultimo_dia, balance_neto
+    hoy = datetime.now().strftime("%Y-%m-%d")
+
+    if ultimo_dia == hoy:
+        return
+
+    file_exists = os.path.isfile(DAILY_FILE)
+    with open(DAILY_FILE, mode="a", newline="") as archivo:
+        writer = csv.writer(archivo)
+        if not file_exists:
+            writer.writerow(["fecha", "balance_neto"])
+        writer.writerow([hoy, round(balance_neto, 2)])
+
+    enviar_telegram(f"🕛 Cierre diario {hoy}\nBalance acumulado: {balance_neto:.2f} MXN")
+    logging.info(f"📘 Resumen diario registrado para {hoy} | Balance: {balance_neto:.2f} MXN")
+    ultimo_dia = hoy
+
+# ==========================================================
+# 🔁 LOOP PRINCIPAL DEL BOT
 # ==========================================================
 def ejecutar_bot():
     logging.info("🤖 Iniciando bot automático optimizado (Bitso Testnet)")
+
+    exchange = ccxt.bitso({
+        "apiKey": BITSO_API_KEY,
+        "secret": BITSO_API_SECRET,
+        "enableRateLimit": True,
+    })
+
+    PAIR = "BTC/MXN"
+    INTERVAL = 300  # segundos (5 min)
+    COMISION_MAKER = 0.003  # 0.3%
+
     while True:
         try:
             ticker = exchange.fetch_ticker(PAIR)
             precio_actual = ticker["last"]
-
-            # Simular señal (placeholder)
             senal = "BUY" if int(time.time()) % 2 == 0 else "SELL"
-
-            logging.info(f"[{datetime.now().strftime('%H:%M:%S')}] Señal: {senal} | Precio: {precio_actual}")
-
             monto = calcular_monto_optimo(precio_actual)
 
+            logging.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Señal: {senal} | Precio: {precio_actual}")
+
             if senal == "BUY":
-                logging.info(f"🟢 Simulando compra {PAIR} | Monto: {monto} BTC @ {precio_actual}")
                 registrar_operacion(PAIR, "BUY", precio_actual, monto, COMISION_MAKER)
-            elif senal == "SELL":
-                logging.info(f"🔴 Simulando venta {PAIR} | Monto: {monto} BTC @ {precio_actual}")
+            else:
                 registrar_operacion(PAIR, "SELL", precio_actual, monto, COMISION_MAKER)
 
             # Enviar resumen cada hora
             if datetime.now().minute == 0:
                 enviar_telegram(f"📊 Balance acumulado: {balance_neto:.2f} MXN")
+
+            # Revisar si es medianoche para guardar resumen diario
+            if datetime.now().hour == 0 and datetime.now().minute == 0:
+                registrar_resumen_diario()
 
             time.sleep(INTERVAL)
 
@@ -131,7 +147,7 @@ def ejecutar_bot():
                 time.sleep(15)
 
 # ==========================================================
-# EJECUCIÓN DEL BOT
+# ▶️ EJECUCIÓN DEL BOT
 # ==========================================================
 if __name__ == "__main__":
     ejecutar_bot()
