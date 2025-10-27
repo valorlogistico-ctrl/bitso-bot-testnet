@@ -1,5 +1,5 @@
 # ==========================================================
-# 🤖 BITSO BOT TESTNET (versión optimizada)
+# 🤖 BITSO BOT TESTNET (versión profesional con heartbeat)
 # Autor: Jorge Macías / valorlogistico-ctrl
 # ==========================================================
 
@@ -8,7 +8,7 @@ import csv
 import time
 import requests
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import ccxt
 from dotenv import load_dotenv
 
@@ -16,21 +16,30 @@ from dotenv import load_dotenv
 # ⚙️ CONFIGURACIÓN INICIAL
 # ==========================================================
 
-load_dotenv()  # Carga variables del archivo .env
+load_dotenv()
 
-# Credenciales Bitso
 BITSO_API_KEY = os.getenv("BITSO_API_KEY")
 BITSO_API_SECRET = os.getenv("BITSO_API_SECRET")
-
-# Credenciales Telegram
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Variables globales
-balance_neto = 0.0
+PAIR = "BTC/MXN"
+INTERVAL = 300  # 5 minutos
+COMISION_MAKER = 0.003  # 0.3%
 CSV_FILE = "bitso_trades.csv"
-DAILY_FILE = "daily_summary.csv"
-ultimo_dia = None
+
+balance_neto = 0.0
+ultimo_trade = datetime.now() - timedelta(days=1)
+ultimo_heartbeat = datetime.now() - timedelta(hours=1)
+
+# ==========================================================
+# 🧾 LOGGING
+# ==========================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
 # ==========================================================
 # 📡 FUNCIÓN: Enviar mensaje a Telegram
@@ -43,19 +52,18 @@ def enviar_telegram(mensaje):
             data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}
             requests.post(url, data=data)
     except Exception as e:
-        print(f"⚠️ Error enviando Telegram: {e}")
+        logging.warning(f"⚠️ Error enviando Telegram: {e}")
 
 # ==========================================================
 # 💾 FUNCIÓN: Registrar operación
 # ==========================================================
 def registrar_operacion(par, accion, precio, monto, comision_pct):
-    """Guarda operaciones y actualiza el balance neto."""
-    global balance_neto
-
+    global balance_neto, ultimo_trade
     fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     comision = precio * monto * comision_pct
     resultado_neto = -(precio * monto + comision) if accion == "BUY" else (precio * monto - comision)
     balance_neto += resultado_neto
+    ultimo_trade = datetime.now()
 
     file_exists = os.path.isfile(CSV_FILE)
     with open(CSV_FILE, mode="a", newline="") as archivo:
@@ -64,46 +72,36 @@ def registrar_operacion(par, accion, precio, monto, comision_pct):
             writer.writerow(["timestamp", "par", "acción", "precio", "monto", "comisión", "resultado_neto"])
         writer.writerow([fecha, par, accion, precio, monto, comision, resultado_neto])
 
-    logging.info(f"💾 Registro guardado: {accion} {monto} {par} @ {precio} | Comisión: {comision:.2f}")
-    enviar_telegram(f"{accion} {par}\nPrecio: {precio:,.2f}\nMonto: {monto:.6f}\nBalance: {balance_neto:,.2f} MXN")
+    mensaje = f"{'🟢 Compra' if accion == 'BUY' else '🔴 Venta'} {par} — {monto:.6f} BTC ejecutados | Balance actual: {balance_neto:,.2f} MXN"
+    enviar_telegram(mensaje)
+    logging.info(f"💾 {accion} {monto} BTC @ {precio} | Balance: {balance_neto:.2f}")
 
 # ==========================================================
 # 🧮 FUNCIÓN: Calcular monto óptimo
 # ==========================================================
 def calcular_monto_optimo(precio_actual, balance_mxn=1000):
-    """Calcula el monto máximo rentable considerando comisiones."""
-    MONTO_BASE = 0.0001  # BTC mínimo base (~210 MXN aprox)
+    MONTO_BASE = 0.0001
     max_monto = balance_mxn / precio_actual
     monto_final = min(MONTO_BASE * 5, max_monto)
     return round(monto_final, 6)
 
 # ==========================================================
-# 🧾 FUNCIÓN: Registro de balance diario
+# 💓 HEARTBEAT (verificador de vida del bot)
 # ==========================================================
-def registrar_resumen_diario():
-    """Guarda el balance neto al cierre de cada día y envía resumen por Telegram."""
-    global ultimo_dia, balance_neto
-    hoy = datetime.now().strftime("%Y-%m-%d")
-
-    if ultimo_dia == hoy:
-        return
-
-    file_exists = os.path.isfile(DAILY_FILE)
-    with open(DAILY_FILE, mode="a", newline="") as archivo:
-        writer = csv.writer(archivo)
-        if not file_exists:
-            writer.writerow(["fecha", "balance_neto"])
-        writer.writerow([hoy, round(balance_neto, 2)])
-
-    enviar_telegram(f"🕛 Cierre diario {hoy}\nBalance acumulado: {balance_neto:.2f} MXN")
-    logging.info(f"📘 Resumen diario registrado para {hoy} | Balance: {balance_neto:.2f} MXN")
-    ultimo_dia = hoy
+def heartbeat():
+    """Envía mensaje de confirmación cada hora."""
+    global ultimo_heartbeat
+    ahora = datetime.now()
+    if (ahora - ultimo_heartbeat).total_seconds() >= 3600:  # cada hora
+        enviar_telegram(f"💓 Bot activo | {ahora.strftime('%d %b %H:%M')} | Último trade hace {(ahora - ultimo_trade).seconds // 60} min")
+        ultimo_heartbeat = ahora
+        logging.info("💓 Heartbeat enviado correctamente.")
 
 # ==========================================================
-# 🔁 LOOP PRINCIPAL DEL BOT (con modo de prueba corto)
+# 🔁 LOOP PRINCIPAL
 # ==========================================================
-def ejecutar_bot(modo_test=False, ciclos_test=3):
-    logging.info("🤖 Iniciando bot automático optimizado (Bitso Testnet)")
+def ejecutar_bot():
+    logging.info("🤖 Iniciando bot automático profesional (Bitso Testnet)")
 
     exchange = ccxt.bitso({
         "apiKey": BITSO_API_KEY,
@@ -111,11 +109,6 @@ def ejecutar_bot(modo_test=False, ciclos_test=3):
         "enableRateLimit": True,
     })
 
-    PAIR = "BTC/MXN"
-    INTERVAL = 10 if modo_test else 300  # 10 seg en test, 5 min en producción
-    COMISION_MAKER = 0.003  # 0.3%
-
-    contador = 0
     while True:
         try:
             ticker = exchange.fetch_ticker(PAIR)
@@ -123,42 +116,18 @@ def ejecutar_bot(modo_test=False, ciclos_test=3):
             senal = "BUY" if int(time.time()) % 2 == 0 else "SELL"
             monto = calcular_monto_optimo(precio_actual)
 
-            logging.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Señal: {senal} | Precio: {precio_actual}")
-
-            if senal == "BUY":
-                registrar_operacion(PAIR, "BUY", precio_actual, monto, COMISION_MAKER)
-            else:
-                registrar_operacion(PAIR, "SELL", precio_actual, monto, COMISION_MAKER)
-
-            enviar_telegram(f"📊 Balance acumulado: {balance_neto:.2f} MXN")
-
-            if modo_test:
-                contador += 1
-                if contador >= ciclos_test:
-                    enviar_telegram("✅ Test corto finalizado correctamente en Render.")
-                    print("✅ Test corto finalizado correctamente.")
-                    break
+            registrar_operacion(PAIR, senal, precio_actual, monto, COMISION_MAKER)
+            heartbeat()
 
             time.sleep(INTERVAL)
 
         except Exception as e:
             logging.error(f"⚠️ Error en el ciclo: {e}")
-            if "rate limit" in str(e).lower():
-                time.sleep(60)
-            else:
-                time.sleep(15)
+            time.sleep(15)
 
 # ==========================================================
-# ▶️ EJECUCIÓN DEL BOT (modo producción persistente)
+# ▶️ EJECUCIÓN
 # ==========================================================
 if __name__ == "__main__":
-    try:
-        enviar_telegram("🚀 Bot Bitso iniciado correctamente en Render (modo producción).")
-        ejecutar_bot(modo_test=False)
-    except Exception as e:
-        logging.error(f"❌ Error crítico: {e}")
-        enviar_telegram(f"⚠️ Error crítico en bot: {e}")
-        while True:
-            # Mantiene el proceso vivo aunque ocurra un error
-            time.sleep(300)
+    ejecutar_bot()
 
