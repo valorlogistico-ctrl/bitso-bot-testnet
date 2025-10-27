@@ -1,97 +1,105 @@
+# ============================================
+# 🧠 BITSO BOT TESTNET (versión optimizada)
+# Autor: Jorge Macías / valorlogistico-ctrl
+# ============================================
+
 import os
 import time
 import ccxt
+import csv
 import logging
+from datetime import datetime
 from dotenv import load_dotenv
 
-# ==============================
+# ============================================
 # CONFIGURACIÓN INICIAL
-# ==============================
-load_dotenv()
+# ============================================
 
-BITSO_API_KEY = os.getenv("BITSO_API_KEY")
-BITSO_API_SECRET = os.getenv("BITSO_API_SECRET")
+load_dotenv()  # Carga las variables desde .env
+API_KEY = os.getenv("BITSO_API_KEY")
+API_SECRET = os.getenv("BITSO_API_SECRET")
 
-# Configurar logs para Render
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-logger = logging.getLogger()
-
-# Parámetros principales
-INTERVAL = 60          # segundos entre ciclos
-RISK_PCT = 0.02        # 2% del balance disponible
-MIN_TRADE = 500        # monto mínimo MXN
-MAX_TRADE = 10000      # monto máximo MXN
-TAKER_FEE = 0.00075    # 0.075% comisión estimada
-MAKER_FEE = 0.0005     # 0.05% comisión estimada
-SYMBOL = "BTC/MXN"
-
-# Inicializar conexión
-bitso = ccxt.bitso({
-    "apiKey": BITSO_API_KEY,
-    "secret": BITSO_API_SECRET,
+exchange = ccxt.bitso({
+    "apiKey": API_KEY,
+    "secret": API_SECRET,
     "enableRateLimit": True,
 })
 
-logger.info("🚀 Iniciando bot automático optimizado (Bitso Testnet)")
-logger.info(f"Par: {SYMBOL} | Intervalo: {INTERVAL}s | Riesgo: {RISK_PCT*100:.1f}%")
+# Configura logging (Render muestra los print/logs)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-# ==============================
-# FUNCIÓN PARA CALCULAR MONTO ÓPTIMO
-# ==============================
-def calcular_tamano_operacion():
-    balance = bitso.fetch_balance()
-    mxn_balance = balance["total"]["MXN"]
+# ============================================
+# PARÁMETROS DE OPERACIÓN
+# ============================================
 
-    trade_size = mxn_balance * RISK_PCT
-    trade_size = max(MIN_TRADE, min(trade_size, MAX_TRADE))
+PAIR = "BTC/MXN"               # Par de trading
+INTERVAL = 30                  # Tiempo entre ciclos (segundos)
+MONTOS_BASE = 0.0001           # Tamaño base de operación BTC (≈ 2.1 MXN test)
+COMISION_MAKER = 0.001         # 0.1% Bitso maker
+COMISION_TAKER = 0.003         # 0.3% Bitso taker
+CSV_FILE = "bitso_trades.csv"  # Archivo histórico
 
-    logger.info(f"💰 Balance disponible: {mxn_balance:.2f} MXN | Tamaño de orden: {trade_size:.2f} MXN")
-    return trade_size
+# ============================================
+# FUNCIÓN DE REGISTRO HISTÓRICO
+# ============================================
 
-# ==============================
-# LOOP PRINCIPAL
-# ==============================
-last_signal = None
+def registrar_operacion(par, accion, precio, monto, comision_pct):
+    """Guarda operación simulada en CSV."""
+    fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    comision = precio * monto * comision_pct
+    resultado_neto = (precio * monto) - comision if accion == "SELL" else -(precio * monto) - comision
 
-while True:
-    try:
-        start = time.time()
+    file_exists = os.path.isfile(CSV_FILE)
+    with open(CSV_FILE, mode="a", newline="") as archivo:
+        writer = csv.writer(archivo)
+        if not file_exists:
+            writer.writerow(["timestamp", "par", "accion", "precio", "monto", "comision", "resultado_neto"])
+        writer.writerow([fecha, par, accion, precio, monto, comision, resultado_neto])
 
-        ticker = bitso.fetch_ticker(SYMBOL)
-        price = ticker["last"]
+    logging.info(f"💾 Registro guardado: {accion} {monto} {par} @ {precio} | Comisión: {comision:.4f}")
 
-        # Simulación de señal: alterna entre BUY y SELL
-        signal = "BUY" if int(time.time() / 60) % 2 == 0 else "SELL"
+# ============================================
+# FUNCIÓN DE CÁLCULO DE MONTO ÓPTIMO
+# ============================================
 
-        # Calcular tamaño dinámico
-        trade_size = calcular_tamano_operacion()
+def calcular_monto_optimo(precio_actual, balance_mxn=1000):
+    """Calcula el monto máximo rentable considerando comisiones."""
+    max_monto = balance_mxn / precio_actual
+    monto_final = max(MONTOS_BASE, min(max_monto, MONTOS_BASE * 5))
+    return round(monto_final, 6)
 
-        # Calcular costo estimado de comisiones
-        cost_est = trade_size * price * (TAKER_FEE * 2)  # entrada + salida
-        logger.info(f"💸 Costo estimado por ciclo: {cost_est:.2f} MXN")
+# ============================================
+# LOOP PRINCIPAL DEL BOT
+# ============================================
 
-        # Ejemplo de decisión basada en margen esperado
-        expected_gain = trade_size * price * 0.003  # margen esperado del 0.3%
-        if expected_gain <= cost_est:
-            logger.warning("❌ Ganancia esperada insuficiente para cubrir comisiones, se omite la operación.")
-        else:
-            if signal != last_signal:
-                logger.info(f"🟢 Señal: {signal} | Precio: {price:.2f}")
+def ejecutar_bot():
+    logging.info("🚀 Iniciando bot automático optimizado (Bitso Testnet)")
 
-                # Simulación: usar limit order para reducir fee
-                amount = trade_size / price
-                logger.info(f"📊 Monto estimado: {amount:.6f} BTC | Tipo: LIMIT (maker)")
+    while True:
+        try:
+            ticker = exchange.fetch_ticker(PAIR)
+            precio_actual = ticker["last"]
 
-                last_signal = signal
+            logging.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Señal: BUY | Precio: {precio_actual}")
 
-        elapsed = round(time.time() - start, 2)
-        logger.info(f"⏱ Ciclo completado en {elapsed}s | Esperando {INTERVAL}s...\n")
-        time.sleep(INTERVAL)
+            # Simulación de compra
+            monto = calcular_monto_optimo(precio_actual)
+            logging.info(f"🟢 Simulando compra {PAIR} | Monto: {monto} BTC @ {precio_actual} MXN")
 
-    except Exception as e:
-        logger.error(f"⚠️ Error: {e}")
-        time.sleep(30)
+            # Registrar la operación simulada
+            registrar_operacion(PAIR, "BUY", precio_actual, monto, COMISION_MAKER)
+
+            # Esperar hasta el siguiente ciclo
+            time.sleep(INTERVAL)
+
+        except Exception as e:
+            logging.error(f"❌ Error en el ciclo: {e}")
+            time.sleep(10)
+
+# ============================================
+# EJECUCIÓN DEL BOT
+# ============================================
+
+if __name__ == "__main__":
+    ejecutar_bot()
 
