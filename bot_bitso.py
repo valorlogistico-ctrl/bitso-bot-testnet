@@ -4,19 +4,16 @@
 # ==========================================================
 
 import os
-import csv
 import time
-import requests
-import logging
-import sys
-from datetime import datetime, timedelta
 import ccxt
+import requests
+import datetime
+import logging
 from dotenv import load_dotenv
 
 # ==========================================================
-# ⚙️ CONFIGURACIÓN INICIAL
+# 🧩 CONFIGURACIÓN INICIAL
 # ==========================================================
-
 load_dotenv()
 
 BITSO_API_KEY = os.getenv("BITSO_API_KEY")
@@ -24,108 +21,99 @@ BITSO_API_SECRET = os.getenv("BITSO_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-PAIR = "BTC/MXN"
-INTERVAL = 300  # 5 minutos
-COMISION_MAKER = 0.003  # 0.3%
-CSV_FILE = "bitso_trades.csv"
+PAIR = "btc_mxn"
+INTERVAL = 300  # Intervalo de operación en segundos (5 min)
+COMISION_MAKER = 0.001
 
-balance_neto = 0.0
-ultimo_trade = datetime.now() - timedelta(days=1)
-ultimo_heartbeat = datetime.now() - timedelta(hours=1)
-ultimo_reinicio = datetime.now().date()
+ultimo_heartbeat = None
+ultimo_reinicio = datetime.date.today()
+telegram_fails = 0  # contador de fallos consecutivos de Telegram
 
 # ==========================================================
-# 🧾 LOGGING
+# 🪵 LOGGING
 # ==========================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ==========================================================
-# 📡 FUNCIÓN: Enviar mensaje a Telegram
+# 📡 FUNCIONES DE SOPORTE
 # ==========================================================
-def enviar_telegram(mensaje):
-    """Envía mensajes al chat de Telegram configurado."""
+
+def enviar_telegram(msg):
+    """Envía mensajes a Telegram con reintentos y control de errores."""
+    global telegram_fails
     try:
-        if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}
-            requests.post(url, data=data)
-    except Exception as e:
-        logging.warning(f"⚠️ Error enviando Telegram: {e}")
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+        resp = requests.post(url, data=data, timeout=10)
 
-# ==========================================================
-# 💾 FUNCIÓN: Registrar operación
-# ==========================================================
-def registrar_operacion(par, accion, precio, monto, comision_pct):
-    global balance_neto, ultimo_trade
-    fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    comision = precio * monto * comision_pct
-    resultado_neto = -(precio * monto + comision) if accion == "BUY" else (precio * monto - comision)
-    balance_neto += resultado_neto
-    ultimo_trade = datetime.now()
+        if resp.status_code == 200:
+            telegram_fails = 0
+            return True
+        else:
+            telegram_fails += 1
+            logging.warning(f"⚠️ Fallo Telegram ({telegram_fails}/3): {resp.text}")
+            if telegram_fails >= 3:
+                logging.error("❌ Telegram sin respuesta (3 intentos fallidos)")
+                requests.post(
+                    url,
+                    data={"chat_id": TELEGRAM_CHAT_ID,
+                          "text": "⚠️ Error: Telegram sin respuesta (3 fallos seguidos)"}
+                )
+    except requests.exceptions.RequestException as e:
+        telegram_fails += 1
+        logging.error(f"🚫 Error conexión Telegram: {e}")
+        if telegram_fails >= 3:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                data={"chat_id": TELEGRAM_CHAT_ID,
+                      "text": "⚠️ Problema persistente al conectar con Telegram."}
+            )
+    return False
 
-    file_exists = os.path.isfile(CSV_FILE)
-    with open(CSV_FILE, mode="a", newline="") as archivo:
-        writer = csv.writer(archivo)
-        if not file_exists:
-            writer.writerow(["timestamp", "par", "acción", "precio", "monto", "comisión", "resultado_neto"])
-        writer.writerow([fecha, par, accion, precio, monto, comision, resultado_neto])
 
-    mensaje = f"{'🟢 Compra' if accion == 'BUY' else '🔴 Venta'} {par} — {monto:.6f} BTC ejecutados | Balance actual: {balance_neto:,.2f} MXN"
-    enviar_telegram(mensaje)
-    logging.info(f"💾 {accion} {monto} BTC @ {precio} | Balance: {balance_neto:.2f}")
+def calcular_monto_optimo(precio):
+    """Monto fijo simulado (ajústalo a tu balance real)."""
+    return 100 / precio  # Compra equivalente a 100 MXN
 
-# ==========================================================
-# 🧮 FUNCIÓN: Calcular monto óptimo
-# ==========================================================
-def calcular_monto_optimo(precio_actual, balance_mxn=1000):
-    MONTO_BASE = 0.0001
-    max_monto = balance_mxn / precio_actual
-    monto_final = min(MONTO_BASE * 5, max_monto)
-    return round(monto_final, 6)
 
-# ==========================================================
-# 💓 HEARTBEAT (verificador de vida del bot)
-# ==========================================================
+def registrar_operacion(par, tipo, precio, monto, comision):
+    """Guarda logs y simula operación."""
+    logging.info(f"{tipo} {monto:.6f} BTC @ {precio:.2f} | Balance simulado")
+    enviar_telegram(f"{'🟢 Compra' if tipo == 'BUY' else '🔴 Venta'} BTC/MXN — {monto:.6f} BTC ejecutados a {precio:,.2f} MXN")
+
+
 def heartbeat():
-    """Envía mensaje de confirmación solo si no hubo operaciones recientes."""
+    """Envía un mensaje de vida cada hora para confirmar que el bot sigue activo."""
     global ultimo_heartbeat
-    ahora = datetime.now()
-    if (ahora - ultimo_heartbeat).total_seconds() >= 3600:
-        horas_desde_trade = (ahora - ultimo_trade).total_seconds() / 3600
-        if horas_desde_trade >= 2:
-            enviar_telegram(f"💓 Bot activo | {ahora.strftime('%d %b %H:%M')} | Sin trades recientes (último hace {horas_desde_trade:.1f}h)")
-            logging.info("💓 Heartbeat enviado (sin actividad reciente).")
+    ahora = datetime.datetime.now()
+    if ultimo_heartbeat is None or (ahora - ultimo_heartbeat).total_seconds() >= 3600:
+        enviar_telegram(f"💓 Heartbeat OK — Bot activo (Bitso Testnet)\n🕒 {ahora.strftime('%d-%b %H:%M')}")
         ultimo_heartbeat = ahora
 
-# ==========================================================
-# 🔁 FUNCIÓN: Reinicio diario
-# ==========================================================
+
 def verificar_reinicio_diario():
-    """Reinicia el bot automáticamente todos los días a las 06:00 AM."""
+    """Reinicio automático diario a las 06:00 AM (GMT-7)."""
     global ultimo_reinicio
-    ahora = datetime.now()
+    ahora = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-7)))
     hora_actual = ahora.time()
-    if hora_actual.hour == 6 and hora_actual.minute < 5:  # ventana de 5 min
-        if ultimo_reinicio != ahora.date():
-            enviar_telegram("🔄 Reinicio automático diario a las 06:00 AM")
-            logging.info("🔄 Reinicio automático iniciado...")
-            ultimo_reinicio = ahora.date()
-            sys.exit(0)  # Render relanza el servicio automáticamente
+    if hora_actual.hour == 6 and (datetime.date.today() != ultimo_reinicio):
+        enviar_telegram("🔁 Reinicio automático diario en curso (06:00 AM GMT-7)")
+        logging.info("⏳ Reinicio automático diario programado.")
+        ultimo_reinicio = datetime.date.today()
+        os._exit(0)  # Render relanza el servicio automáticamente
 
 # ==========================================================
-# 🔁 LOOP PRINCIPAL
+# 🔄 LOOP PRINCIPAL
 # ==========================================================
+
 def ejecutar_bot():
+    """Loop continuo principal del bot."""
     logging.info("🤖 Iniciando bot automático profesional (Bitso Testnet)")
 
     exchange = ccxt.bitso({
         "apiKey": BITSO_API_KEY,
         "secret": BITSO_API_SECRET,
-        "enableRateLimit": True,
+        "enableRateLimit": True
     })
 
     while True:
@@ -142,11 +130,12 @@ def ejecutar_bot():
             time.sleep(INTERVAL)
 
         except Exception as e:
-            logging.error(f"⚠️ Error en el ciclo: {e}")
+            logging.error(f"⚠️ Error en el ciclo principal: {e}")
+            enviar_telegram(f"⚠️ Error en ejecución: {str(e)[:150]}")
             time.sleep(15)
 
 # ==========================================================
-# ▶️ EJECUCIÓN
+# 🚀 EJECUCIÓN PRINCIPAL
 # ==========================================================
 if __name__ == "__main__":
     ejecutar_bot()
