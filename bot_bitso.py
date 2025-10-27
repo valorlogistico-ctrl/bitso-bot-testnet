@@ -100,9 +100,9 @@ def registrar_resumen_diario():
     ultimo_dia = hoy
 
 # ==========================================================
-# 🔁 LOOP PRINCIPAL DEL BOT
+# 🔁 LOOP PRINCIPAL DEL BOT (con modo de prueba corto)
 # ==========================================================
-def ejecutar_bot():
+def ejecutar_bot(modo_test=False, ciclos_test=3):
     logging.info("🤖 Iniciando bot automático optimizado (Bitso Testnet)")
 
     exchange = ccxt.bitso({
@@ -112,9 +112,10 @@ def ejecutar_bot():
     })
 
     PAIR = "BTC/MXN"
-    INTERVAL = 300  # segundos (5 min)
+    INTERVAL = 10 if modo_test else 300  # 10 seg en test, 5 min en producción
     COMISION_MAKER = 0.003  # 0.3%
 
+    contador = 0
     while True:
         try:
             ticker = exchange.fetch_ticker(PAIR)
@@ -129,13 +130,14 @@ def ejecutar_bot():
             else:
                 registrar_operacion(PAIR, "SELL", precio_actual, monto, COMISION_MAKER)
 
-            # Enviar resumen cada hora
-            if datetime.now().minute == 0:
-                enviar_telegram(f"📊 Balance acumulado: {balance_neto:.2f} MXN")
+            enviar_telegram(f"📊 Balance acumulado: {balance_neto:.2f} MXN")
 
-            # Revisar si es medianoche para guardar resumen diario
-            if datetime.now().hour == 0 and datetime.now().minute == 0:
-                registrar_resumen_diario()
+            if modo_test:
+                contador += 1
+                if contador >= ciclos_test:
+                    enviar_telegram("✅ Test corto finalizado correctamente en Render.")
+                    print("✅ Test corto finalizado correctamente.")
+                    break
 
             time.sleep(INTERVAL)
 
@@ -150,5 +152,5 @@ def ejecutar_bot():
 # ▶️ EJECUCIÓN DEL BOT
 # ==========================================================
 if __name__ == "__main__":
-    ejecutar_bot()
+    ejecutar_bot(modo_test=True)  # Cambia a False cuando lo dejes en modo continuo
 
