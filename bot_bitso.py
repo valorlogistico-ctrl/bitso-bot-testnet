@@ -1,5 +1,5 @@
 # ==========================================================
-# 🤖 BITSO BOT TESTNET (versión profesional con heartbeat)
+# 🤖 BITSO BOT TESTNET (versión con heartbeat y reinicio diario)
 # Autor: Jorge Macías / valorlogistico-ctrl
 # ==========================================================
 
@@ -8,6 +8,7 @@ import csv
 import time
 import requests
 import logging
+import sys
 from datetime import datetime, timedelta
 import ccxt
 from dotenv import load_dotenv
@@ -31,6 +32,7 @@ CSV_FILE = "bitso_trades.csv"
 balance_neto = 0.0
 ultimo_trade = datetime.now() - timedelta(days=1)
 ultimo_heartbeat = datetime.now() - timedelta(hours=1)
+ultimo_reinicio = datetime.now().date()
 
 # ==========================================================
 # 🧾 LOGGING
@@ -89,13 +91,30 @@ def calcular_monto_optimo(precio_actual, balance_mxn=1000):
 # 💓 HEARTBEAT (verificador de vida del bot)
 # ==========================================================
 def heartbeat():
-    """Envía mensaje de confirmación cada hora."""
+    """Envía mensaje de confirmación solo si no hubo operaciones recientes."""
     global ultimo_heartbeat
     ahora = datetime.now()
-    if (ahora - ultimo_heartbeat).total_seconds() >= 3600:  # cada hora
-        enviar_telegram(f"💓 Bot activo | {ahora.strftime('%d %b %H:%M')} | Último trade hace {(ahora - ultimo_trade).seconds // 60} min")
+    if (ahora - ultimo_heartbeat).total_seconds() >= 3600:
+        horas_desde_trade = (ahora - ultimo_trade).total_seconds() / 3600
+        if horas_desde_trade >= 2:
+            enviar_telegram(f"💓 Bot activo | {ahora.strftime('%d %b %H:%M')} | Sin trades recientes (último hace {horas_desde_trade:.1f}h)")
+            logging.info("💓 Heartbeat enviado (sin actividad reciente).")
         ultimo_heartbeat = ahora
-        logging.info("💓 Heartbeat enviado correctamente.")
+
+# ==========================================================
+# 🔁 FUNCIÓN: Reinicio diario
+# ==========================================================
+def verificar_reinicio_diario():
+    """Reinicia el bot automáticamente todos los días a las 06:00 AM."""
+    global ultimo_reinicio
+    ahora = datetime.now()
+    hora_actual = ahora.time()
+    if hora_actual.hour == 6 and hora_actual.minute < 5:  # ventana de 5 min
+        if ultimo_reinicio != ahora.date():
+            enviar_telegram("🔄 Reinicio automático diario a las 06:00 AM")
+            logging.info("🔄 Reinicio automático iniciado...")
+            ultimo_reinicio = ahora.date()
+            sys.exit(0)  # Render relanza el servicio automáticamente
 
 # ==========================================================
 # 🔁 LOOP PRINCIPAL
@@ -118,6 +137,7 @@ def ejecutar_bot():
 
             registrar_operacion(PAIR, senal, precio_actual, monto, COMISION_MAKER)
             heartbeat()
+            verificar_reinicio_diario()
 
             time.sleep(INTERVAL)
 
