@@ -1,142 +1,157 @@
 # ==========================================================
-# 🤖 BITSO BOT TESTNET (versión con heartbeat y reinicio diario)
+# 🤖 BITSO BOT TESTNET (versión agresiva con control adaptativo)
 # Autor: Jorge Macías / valorlogistico-ctrl
 # ==========================================================
 
-import os
-import time
 import ccxt
+import time
+import pandas as pd
 import requests
-import datetime
-import logging
+import numpy as np
+import os
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # ==========================================================
-# 🧩 CONFIGURACIÓN INICIAL
+# 🔧 CONFIGURACIÓN GENERAL
 # ==========================================================
 load_dotenv()
 
 BITSO_API_KEY = os.getenv("BITSO_API_KEY")
 BITSO_API_SECRET = os.getenv("BITSO_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-PAIR = "btc_mxn"
-INTERVAL = 300  # Intervalo de operación en segundos (5 min)
-COMISION_MAKER = 0.001
-
-ultimo_heartbeat = None
-ultimo_reinicio = datetime.date.today()
-telegram_fails = 0  # contador de fallos consecutivos de Telegram
+PAIR = "BTC/MXN"
+TIMEFRAME = "4h"
 
 # ==========================================================
-# 🪵 LOGGING
+# 💰 GESTIÓN DE RIESGO
 # ==========================================================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+RISK_PERCENT = 0.25
+MIN_TRADE_MXN = 150
+MAX_TRADE_MXN = 1500
+STOP_LOSS_PCT = -2.5
+TAKE_PROFIT_PCT = 4.5
+ADAPTIVE_REDUCTION = 0.15  # tras 3 stops consecutivos
 
 # ==========================================================
-# 📡 FUNCIONES DE SOPORTE
+# ⏰ CONTROL DE CICLO
 # ==========================================================
+GMT_OFFSET = -7
+RESTART_HOUR = 6  # reinicio diario 06:00 GMT-7
+SUMMARY_HOUR = 23  # resumen diario 23:59 GMT-7
+HEARTBEAT_INTERVAL = 3600  # cada hora
 
-def enviar_telegram(msg):
-    """Envía mensajes a Telegram con reintentos y control de errores."""
-    global telegram_fails
+# ==========================================================
+# 📤 FUNCIÓN TELEGRAM
+# ==========================================================
+def send_telegram(msg: str):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-        resp = requests.post(url, data=data, timeout=10)
-
-        if resp.status_code == 200:
-            telegram_fails = 0
-            return True
-        else:
-            telegram_fails += 1
-            logging.warning(f"⚠️ Fallo Telegram ({telegram_fails}/3): {resp.text}")
-            if telegram_fails >= 3:
-                logging.error("❌ Telegram sin respuesta (3 intentos fallidos)")
-                requests.post(
-                    url,
-                    data={"chat_id": TELEGRAM_CHAT_ID,
-                          "text": "⚠️ Error: Telegram sin respuesta (3 fallos seguidos)"}
-                )
-    except requests.exceptions.RequestException as e:
-        telegram_fails += 1
-        logging.error(f"🚫 Error conexión Telegram: {e}")
-        if telegram_fails >= 3:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                data={"chat_id": TELEGRAM_CHAT_ID,
-                      "text": "⚠️ Problema persistente al conectar con Telegram."}
-            )
-    return False
-
-
-def calcular_monto_optimo(precio):
-    """Monto fijo simulado (ajústalo a tu balance real)."""
-    return 100 / precio  # Compra equivalente a 100 MXN
-
-
-def registrar_operacion(par, tipo, precio, monto, comision):
-    """Guarda logs y simula operación."""
-    logging.info(f"{tipo} {monto:.6f} BTC @ {precio:.2f} | Balance simulado")
-    enviar_telegram(f"{'🟢 Compra' if tipo == 'BUY' else '🔴 Venta'} BTC/MXN — {monto:.6f} BTC ejecutados a {precio:,.2f} MXN")
-
-
-def heartbeat():
-    """Envía un mensaje de vida cada hora para confirmar que el bot sigue activo."""
-    global ultimo_heartbeat
-    ahora = datetime.datetime.now()
-    if ultimo_heartbeat is None or (ahora - ultimo_heartbeat).total_seconds() >= 3600:
-        enviar_telegram(f"💓 Heartbeat OK — Bot activo (Bitso Testnet)\n🕒 {ahora.strftime('%d-%b %H:%M')}")
-        ultimo_heartbeat = ahora
-
-
-def verificar_reinicio_diario():
-    """Reinicio automático diario a las 06:00 AM (GMT-7)."""
-    global ultimo_reinicio
-    ahora = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-7)))
-    hora_actual = ahora.time()
-    if hora_actual.hour == 6 and (datetime.date.today() != ultimo_reinicio):
-        enviar_telegram("🔁 Reinicio automático diario en curso (06:00 AM GMT-7)")
-        logging.info("⏳ Reinicio automático diario programado.")
-        ultimo_reinicio = datetime.date.today()
-        os._exit(0)  # Render relanza el servicio automáticamente
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except Exception as e:
+        print(f"❌ Error enviando a Telegram: {e}")
 
 # ==========================================================
-# 🔄 LOOP PRINCIPAL
+# 📈 CONFIGURAR EXCHANGE (Bitso Testnet)
 # ==========================================================
+exchange = ccxt.bitso({
+    "apiKey": BITSO_API_KEY,
+    "secret": BITSO_API_SECRET,
+    "enableRateLimit": True,
+})
 
-def ejecutar_bot():
-    """Loop continuo principal del bot."""
-    logging.info("🤖 Iniciando bot automático profesional (Bitso Testnet)")
+# ==========================================================
+# ⚙️ FUNCIÓN PRINCIPAL DE OPERACIÓN
+# ==========================================================
+def get_signals():
+    df = pd.DataFrame(exchange.fetch_ohlcv(PAIR, TIMEFRAME), columns=["time","open","high","low","close","volume"])
+    df["ma_fast"] = df["close"].rolling(5).mean()
+    df["ma_slow"] = df["close"].rolling(20).mean()
+    last = df.iloc[-1]
+    if last["ma_fast"] > last["ma_slow"]:
+        return "BUY", last["close"]
+    elif last["ma_fast"] < last["ma_slow"]:
+        return "SELL", last["close"]
+    return None, last["close"]
 
-    exchange = ccxt.bitso({
-        "apiKey": BITSO_API_KEY,
-        "secret": BITSO_API_SECRET,
-        "enableRateLimit": True
-    })
+def execute_trade(signal, price, balance):
+    global RISK_PERCENT
+    trade_mxn = min(max(balance * RISK_PERCENT, MIN_TRADE_MXN), MAX_TRADE_MXN)
+    qty = trade_mxn / price
+    result = f"🟢 Compra BTC/MXN — {qty:.5f} BTC ejecutados | Balance usado: {trade_mxn:.2f} MXN" if signal == "BUY" \
+        else f"🔴 Venta BTC/MXN — {qty:.5f} BTC ejecutados | Balance recibido: {trade_mxn:.2f} MXN"
+    send_telegram(result)
+    print(result)
+    return {"side": signal, "price": price, "qty": qty}
+
+# ==========================================================
+# 📊 MONITOREO Y RESUMEN
+# ==========================================================
+def daily_summary(trades):
+    if not trades:
+        send_telegram("📊 Sin operaciones registradas hoy.")
+        return
+    df = pd.DataFrame(trades)
+    gains = np.sum([
+        ((row["price_exit"] - row["price_entry"]) / row["price_entry"]) * 100
+        if row["side"] == "BUY" else
+        ((row["price_entry"] - row["price_exit"]) / row["price_entry"]) * 100
+        for _, row in df.iterrows()
+    ])
+    send_telegram(
+        f"📅 Resumen diario:\n"
+        f"Operaciones: {len(df)} | Resultado neto: {gains:.2f}%\n"
+        f"Ganadoras: {(gains > 0)} | Reinicio programado a las 06:00 AM GMT-7"
+    )
+
+# ==========================================================
+# ♻️ LOOP PRINCIPAL
+# ==========================================================
+def main():
+    print("🚀 Iniciando bot (modo agresivo con control adaptativo)")
+    send_telegram("🤖 Bot activo (modo testnet agresivo con control adaptativo).")
+
+    trades = []
+    consecutive_losses = 0
 
     while True:
-        try:
-            ticker = exchange.fetch_ticker(PAIR)
-            precio_actual = ticker["last"]
-            senal = "BUY" if int(time.time()) % 2 == 0 else "SELL"
-            monto = calcular_monto_optimo(precio_actual)
+        now = datetime.now(timezone(timedelta(hours=GMT_OFFSET)))
+        hour = now.hour
 
-            registrar_operacion(PAIR, senal, precio_actual, monto, COMISION_MAKER)
-            heartbeat()
-            verificar_reinicio_diario()
+        # Reinicio diario
+        if hour == RESTART_HOUR and now.minute == 0:
+            daily_summary(trades)
+            send_telegram("♻️ Reinicio diario ejecutado.")
+            os.system("python bot_bitso.py")
+            break
 
-            time.sleep(INTERVAL)
+        # Heartbeat
+        if now.minute == 0:
+            send_telegram(f"💓 Bot activo ({PAIR}) | {now.strftime('%H:%M')} GMT-7")
 
-        except Exception as e:
-            logging.error(f"⚠️ Error en el ciclo principal: {e}")
-            enviar_telegram(f"⚠️ Error en ejecución: {str(e)[:150]}")
-            time.sleep(15)
+        # Señales
+        signal, price = get_signals()
+        balance = 1000  # balance simulado MXN
+        if signal:
+            trade = execute_trade(signal, price, balance)
+            # Simular resultado
+            variation = np.random.uniform(STOP_LOSS_PCT, TAKE_PROFIT_PCT)
+            trade["price_entry"] = price
+            trade["price_exit"] = price * (1 + variation / 100)
+            trades.append(trade)
+            if variation < 0:
+                consecutive_losses += 1
+                if consecutive_losses >= 3:
+                    RISK_PERCENT = ADAPTIVE_REDUCTION
+                    send_telegram("⚠️ 3 pérdidas seguidas — Riesgo reducido temporalmente a 15%")
+            else:
+                consecutive_losses = 0
+                RISK_PERCENT = 0.25
 
-# ==========================================================
-# 🚀 EJECUCIÓN PRINCIPAL
-# ==========================================================
+        time.sleep(300)  # Esperar 5 min entre iteraciones
+
 if __name__ == "__main__":
-    ejecutar_bot()
+    main()
 
