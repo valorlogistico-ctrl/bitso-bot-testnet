@@ -149,8 +149,16 @@ def ejecutar_bot(modo_test=False, ciclos_test=3):
                 time.sleep(15)
 
 # ==========================================================
-# ▶️ EJECUCIÓN DEL BOT
+# ▶️ EJECUCIÓN DEL BOT (modo producción persistente)
 # ==========================================================
 if __name__ == "__main__":
-    ejecutar_bot(modo_test=False)  # Cambia a False cuando lo dejes en modo continuo
+    try:
+        enviar_telegram("🚀 Bot Bitso iniciado correctamente en Render (modo producción).")
+        ejecutar_bot(modo_test=False)
+    except Exception as e:
+        logging.error(f"❌ Error crítico: {e}")
+        enviar_telegram(f"⚠️ Error crítico en bot: {e}")
+        while True:
+            # Mantiene el proceso vivo aunque ocurra un error
+            time.sleep(300)
 
